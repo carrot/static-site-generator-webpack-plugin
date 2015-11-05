@@ -1,118 +1,98 @@
-var evaluate = require('eval');
-var path = require('path');
-var Promise = require('bluebird');
+import evaluate from 'eval'
+import path from 'path'
 
-function StaticSiteGeneratorWebpackPlugin(renderSrc, outputPaths, locals) {
-  this.renderSrc = renderSrc;
-  this.outputPaths = Array.isArray(outputPaths) ? outputPaths : [outputPaths];
-  this.locals = locals;
-}
-
-StaticSiteGeneratorWebpackPlugin.prototype.apply = function(compiler) {
-  var self = this;
-
-  compiler.plugin('emit', function(compiler, done) {
-    var renderPromises;
-
-    var webpackStats = compiler.getStats();
-    var webpackStatsJson = webpackStats.toJson();
-
-    try {
-      var asset = findAsset(self.renderSrc, compiler, webpackStatsJson);
-
-      if (asset == null) {
-        throw new Error('Source file not found: "' + self.renderSrc + '"');
-      }
-
-      var assets = getAssetsFromCompiler(compiler, webpackStatsJson);
-
-      var source = asset.source();
-      var render = evaluate(source, /* filename: */ self.renderSrc, /* scope: */ undefined, /* includeGlobals: */ true);
-
-      renderPromises = self.outputPaths.map(function(outputPath) {
-        var outputFileName = path.join(outputPath, '/index.html')
-          .replace(/^(\/|\\)/, ''); // Remove leading slashes for webpack-dev-server
-
-        var locals = {
-          path: outputPath,
-          assets: assets,
-          webpackStats: webpackStats
-        };
-
-        for (var prop in self.locals) {
-          if (self.locals.hasOwnProperty(prop)) {
-            locals[prop] = self.locals[prop];
-          }
-        }
-
-        return Promise
-          .fromNode(render.bind(null, locals))
-          .then(function(output) {
-            compiler.assets[outputFileName] = createAssetFromContents(output);
-          })
-          .catch(function(err) {
-            compiler.errors.push(err.stack);
-          });
-      });
-
-      Promise.all(renderPromises).nodeify(done);
-    } catch (err) {
-      compiler.errors.push(err.stack);
-      done(err);
-    }
-  });
-};
-
-var findAsset = function(src, compiler, webpackStatsJson) {
-  var asset = compiler.assets[src];
-
-  if (asset) {
-    return asset;
+export default class StaticSiteGeneratorWebpackPlugin {
+  constructor (renderChunkName = 'main') {
+    this.renderChunkName = renderChunkName
   }
 
-  var chunkValue = webpackStatsJson.assetsByChunkName[src];
+  apply (compiler) {
+    compiler.plugin('emit', (compilation, done) => {
+      const webpackStats = compilation.getStats()
+      const webpackStatsJson = webpackStats.toJson()
+
+      try {
+        const asset = findAsset(this.renderChunkName, compilation, webpackStatsJson)
+
+        if (!asset) {
+          throw new Error(`Source file not found: "${this.renderChunkName}"`)
+        }
+
+        const assets = getAssetsFromCompilation(compilation, webpackStatsJson)
+
+        const source = asset.source()
+        const render = evaluate(source, /* filename: */ this.renderChunkName, /* scope: */ {
+          console: console,
+          setTimeout: setTimeout
+        })
+
+        const locals = {
+          assets: assets,
+          webpackStats: webpackStats
+        }
+
+        render(locals)
+          .then(pages => {
+            Object.keys(pages).forEach(pth => {
+              const outputFileName = path.join(pth, '/index.html')
+                .replace(/^(\/|\\)/, '') // Remove leading slashes for webpack-dev-server
+              const html = pages[pth]
+              compilation.assets[outputFileName] = {
+                source: () => html,
+                size: () => html.length
+              }
+            })
+            done()
+          })
+          .catch(err => {
+            compilation.errors.push(err.stack)
+            done(err)
+          })
+      } catch (err) {
+        compilation.errors.push(err.stack)
+        done(err)
+      }
+    })
+  }
+}
+
+function findAsset (src, compilation, webpackStatsJson) {
+  const asset = compilation.assets[src]
+
+  if (asset) {
+    return asset
+  }
+
+  let chunkValue = webpackStatsJson.assetsByChunkName[src]
 
   if (!chunkValue) {
-    return null;
+    return null
   }
   // Webpack outputs an array for each chunk when using sourcemaps
   if (chunkValue instanceof Array) {
     // Is the main bundle always the first element?
-    chunkValue = chunkValue[0];
+    chunkValue = chunkValue[0]
   }
-  return compiler.assets[chunkValue];
-};
+  return compilation.assets[chunkValue]
+}
 
 // Shamelessly stolen from html-webpack-plugin - Thanks @ampedandwired :)
-var getAssetsFromCompiler = function(compiler, webpackStatsJson) {
-  var assets = {};
-  for (var chunk in webpackStatsJson.assetsByChunkName) {
-    var chunkValue = webpackStatsJson.assetsByChunkName[chunk];
+function getAssetsFromCompilation (compilation, webpackStatsJson) {
+  const assets = {}
+  for (let chunk in webpackStatsJson.assetsByChunkName) {
+    let chunkValue = webpackStatsJson.assetsByChunkName[chunk]
 
     // Webpack outputs an array for each chunk when using sourcemaps
     if (chunkValue instanceof Array) {
       // Is the main bundle always the first element?
-      chunkValue = chunkValue[0];
+      chunkValue = chunkValue[0]
     }
 
-    if (compiler.options.output.publicPath) {
-      chunkValue = compiler.options.output.publicPath + chunkValue;
+    if (compilation.options.output.publicPath) {
+      chunkValue = compilation.options.output.publicPath + chunkValue
     }
-    assets[chunk] = chunkValue;
+    assets[chunk] = chunkValue
   }
 
-  return assets;
-};
-
-var createAssetFromContents = function(contents) {
-  return {
-    source: function() {
-      return contents;
-    },
-    size: function() {
-      return contents.length;
-    }
-  };
-};
-
-module.exports = StaticSiteGeneratorWebpackPlugin;
+  return assets
+}
